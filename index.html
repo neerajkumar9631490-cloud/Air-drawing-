@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>AIR DRAW</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --ink:        #02FF92;
+    --ink-dim:    rgba(2,255,146,0.20);
+    --ink-glow:   rgba(2,255,146,0.55);
+    --erase:      #FF6B6B;
+    --erase-glow: rgba(255,107,107,0.55);
+    --bg:         #0d0d0d;
+    --surface:    rgba(8,8,8,0.90);
+    --border:     rgba(2,255,146,0.25);
+    --text:       #e8ffe8;
+    --muted:      rgba(232,255,232,0.40);
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: 'Space Mono', monospace;
+    color: var(--text);
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+
+  /* ── Scene ──────────────────────────────────────────────── */
+  #scene { position: fixed; inset: 0; z-index: 0; }
+
+  #video {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);   /* mirror for natural feel */
+    opacity: 0; transition: opacity 0.6s ease;
+    background: #000;
+  }
+  #video.ready { opacity: 1; }
+
+  /* Two stacked canvases */
+  #canvas-persist,
+  #canvas-preview {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  #canvas-persist { z-index: 1; }
+  #canvas-preview { z-index: 2; }
+
+  /* CRT scanlines */
+  #scene::after {
+    content: ''; position: absolute; inset: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,0,0,0.055) 2px, rgba(0,0,0,0.055) 4px
+    );
+    pointer-events: none; z-index: 3;
+  }
+
+  /* ── HUD (above everything except splash & clear btn) ── */
+  #hud {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 50;
+  }
+
+  /* ── Top bar ────────────────────────────────────────────── */
+  #topbar {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    /* Leave room on the right for the clear button */
+    padding: max(env(safe-area-inset-top,0px),14px) 120px 14px 18px;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.82), transparent);
+  }
+
+  .logo {
+    font-size: 13px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--ink); text-shadow: 0 0 14px var(--ink-glow);
+  }
+
+  /* Status pill */
+  .status-pill {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 11px; letter-spacing: 0.13em; text-transform: uppercase;
+    color: var(--muted);
+    padding: 5px 13px;
+    border: 1px solid var(--border); border-radius: 100px;
+    backdrop-filter: blur(10px); background: var(--surface);
+    transition: color .25s, border-color .25s, background .25s;
+  }
+  .status-pill.active  { color: var(--ink);   border-color: var(--ink); }
+  .status-pill.drawing { color: #fff;          border-color: var(--ink); background: rgba(2,255,146,0.13); }
+  .status-pill.erasing { color: var(--erase); border-color: var(--erase); background: rgba(255,107,107,0.11); }
+
+  .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor; box-shadow: 0 0 6px currentColor;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity:1; transform:scale(1); }
+    50%      { opacity:.35; transform:scale(.6); }
+  }
+  .status-pill.drawing .dot,
+  .status-pill.erasing .dot { animation-duration: .4s; }
+
+  /* ── Shape hint (centred, below topbar) ─────────────────── */
+  #shape-hint {
+    position: absolute;
+    top: 72px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink); background: rgba(0,0,0,0.68);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 14px; backdrop-filter: blur(8px);
+    pointer-events: none; white-space: nowrap;
+    opacity: 0; transition: opacity .2s;
+  }
+  #shape-hint.visible { opacity: 1; }
+
+  /* ── Eraser badge (below clear button, right side) ──────── */
+  #eraser-badge {
+    position: absolute;
+    /* sits directly below the clear button */
+    top: 82px; right: 16px;
+    display: flex; align-items: center; gap: 6px;
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--erase); background: rgba(0,0,0,0.70);
+    border: 1px solid rgba(255,107,107,0.40); border-radius: 8px;
+    padding: 5px 12px; backdrop-filter: blur(8px);
+    pointer-events: none; white-space: nowrap;
+    opacity: 0; transition: opacity .28s;
+  }
+  #eraser-badge.visible { opacity: 1; }
+  .eraser-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--erase); box-shadow: 0 0 6px var(--erase-glow);
+    animation: pulse .4s ease-in-out infinite;
+  }
+
+  /* ── Bottom bar ─────────────────────────────────────────── */
+  #bottombar {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    display: flex; align-items: flex-end;
+    padding: 0 16px max(env(safe-area-inset-bottom,0px),24px);
+    background: linear-gradient(to top, rgba(0,0,0,0.80), transparent);
+    pointer-events: none;
+  }
+
+  #controls-col {
+    display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
+  }
+
+  /* Mode buttons */
+  #mode-row { display: flex; gap: 5px; flex-wrap: wrap; pointer-events: all; }
+
+  .mode-btn {
+    display: flex; align-items: center; gap: 4px;
+    cursor: pointer;
+    border: 1px solid rgba(255,255,255,0.13);
+    border-radius: 10px; background: var(--surface);
+    backdrop-filter: blur(12px); color: var(--muted);
+    font-family: 'Space Mono', monospace;
+    font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase;
+    padding: 7px 10px;
+    transition: color .18s, border-color .18s, background .18s,
+                transform .1s, box-shadow .18s;
+    -webkit-tap-highlight-color: transparent; white-space: nowrap;
+  }
+  .mode-btn .icon { font-size: 12px; line-height: 1; }
+  .mode-btn:active { transform: scale(.90); }
+  .mode-btn.active {
+    color: var(--ink); border-color: var(--ink);
+    background: rgba(2,255,146,0.10);
+    box-shadow: 0 0 14px var(--ink-dim);
+  }
+
+  /* Colour palette */
+  #palette { display: flex; gap: 8px; align-items: center; pointer-events: all; }
+  .swatch {
+    width: 24px; height: 24px; border-radius: 50%;
+    border: 2px solid transparent; cursor: pointer;
+    transition: transform .14s, border-color .14s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .swatch.active { border-color: #fff; transform: scale(1.28); }
+  .swatch:active { transform: scale(.87); }
+
+  /* Brush size pickers */
+  #brush-row { display: flex; gap: 7px; align-items: center; pointer-events: all; }
+  .bsize {
+    border-radius: 50%; background: currentColor;
+    cursor: pointer; border: 2px solid transparent;
+    transition: border-color .14s, transform .14s;
+    -webkit-tap-highlight-color: transparent; flex-shrink: 0;
+  }
+  .bsize.active { border-color: #fff; transform: scale(1.2); }
+
+  /* ════════════════════════════════════════════════════════════
+     CLEAR BUTTON  [12]
+     Fixed top-right, always above canvas, thumb-tap friendly.
+     Uses safe-area padding for notched phones.
+  ════════════════════════════════════════════════════════════ */
+  #btn-clear {
+    position: fixed;
+    top:   max(env(safe-area-inset-top, 0px), 12px);
+    right: max(env(safe-area-inset-right, 0px), 14px);
+
+    /* Large enough for a thumb (≥44 px Apple HIG / 48 dp Material) */
+    min-width: 56px;
+    min-height: 50px;
+    padding: 0 16px;
+
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+
+    /* Layering — must sit above HUD (z:50) and canvases */
+    z-index: 200;
+    pointer-events: all;
+    cursor: pointer;
+
+    /* Shape */
+    border-radius: 14px;
+
+    /* Border: vivid red ring so it reads on any camera background */
+    border: 1.5px solid rgba(255, 90, 90, 0.70);
+
+    /* Background: near-opaque so it never blends into the video */
+    background: rgba(12, 12, 12, 0.92);
+    backdrop-filter: blur(16px);
+
+    /* Layered shadow: subtle depth + red ambient glow */
+    box-shadow:
+      0 2px 12px rgba(0,0,0,0.70),
+      0 0  22px rgba(255, 60, 60, 0.22),
+      inset 0 0 0 1px rgba(255,90,90,0.08);
+
+    /* Typography */
+    font-family: 'Space Mono', monospace;
+    font-size: 11px; font-weight: 700;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: #FF8888;
+
+    transition: background .18s, border-color .18s, box-shadow .18s,
+                transform .10s, color .18s;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+
+  /* Hover state (desktop) */
+  #btn-clear:hover {
+    background: rgba(255, 45, 45, 0.16);
+    border-color: rgba(255, 90, 90, 0.95);
+    color: #fff;
+    box-shadow:
+      0 2px 16px rgba(0,0,0,0.75),
+      0 0  32px rgba(255, 60, 60, 0.45),
+      inset 0 0 0 1px rgba(255,90,90,0.18);
+  }
+
+  /* Tap / click feedback */
+  #btn-clear:active {
+    transform: scale(.90);
+    background: rgba(255, 45, 45, 0.24);
+    border-color: #FF5555;
+  }
+
+  /* Icon inside clear button */
+  #btn-clear .x-icon { font-size: 14px; line-height: 1; }
+
+  /* ── Finger cursor ──────────────────────────────────────── */
+  #cursor {
+    position: fixed;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    /* above scene but below HUD buttons */
+    z-index: 45;
+    display: none;
+
+    /* Default (idle, hand visible) */
+    width: 24px; height: 24px;
+    border: 2px solid var(--ink); background: transparent;
+    box-shadow: 0 0 10px var(--ink-glow), inset 0 0 6px rgba(2,255,146,0.08);
+    transition: width .08s, height .08s, background .08s,
+                border-color .15s, box-shadow .15s, border-style .15s;
+  }
+
+  /* Actively drawing (pinching, not erasing) */
+  #cursor.pinching {
+    width: 13px; height: 13px;
+    background: var(--ink);
+    border-color: var(--ink);
+    box-shadow: 0 0 24px var(--ink-glow);
+  }
+
+  /* Eraser — idle (pinching, slow speed) */
+  #cursor.erase-idle {
+    width: 40px; height: 40px;
+    border: 2px dashed var(--erase);
+    background: rgba(255,107,107,0.06);
+    box-shadow: 0 0 18px var(--erase-glow);
+  }
+
+  /* Eraser — active (pinching, fast speed = erasing) */
+  #cursor.erase-active {
+    width: 48px; height: 48px;
+    border: 2.5px solid var(--erase);
+    background: rgba(255,107,107,0.20);
+    box-shadow: 0 0 30px var(--erase-glow);
+  }
+
+  /* ── Splash screen ──────────────────────────────────────── */
+  #splash {
+    position: fixed; inset: 0; z-index: 300;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 22px;
+    transition: opacity .7s ease;
+  }
+  #splash.hidden { opacity: 0; pointer-events: none; }
+
+  .splash-title {
+    font-size: clamp(30px, 10vw, 54px);
+    letter-spacing: 0.22em; color: var(--ink);
+    text-shadow: 0 0 40px var(--ink-glow), 0 0 80px rgba(2,255,146,0.18);
+    animation: flicker 3s ease-in-out infinite;
+  }
+  @keyframes flicker {
+    0%,100%{opacity:1} 92%{opacity:1} 93%{opacity:.65} 94%{opacity:1}
+    96%{opacity:.5} 97%{opacity:1}
+  }
+  .splash-sub {
+    font-size: 11px; letter-spacing: 0.20em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .loader {
+    width: 52px; height: 2px;
+    background: var(--border); border-radius: 2px;
+    overflow: hidden; position: relative;
+  }
+  .loader::after {
+    content: ''; position: absolute; left: -100%; top: 0;
+    width: 100%; height: 100%;
+    background: var(--ink); animation: load 1.4s ease-in-out infinite;
+    box-shadow: 0 0 8px var(--ink);
+  }
+  @keyframes load { 0%{left:-100%} 100%{left:100%} }
+
+  #splash-msg {
+    font-size: 10px; letter-spacing: 0.13em; text-transform: uppercase;
+    color: var(--muted); text-align: center; max-width: 290px; line-height: 1.9;
+  }
+
+  .tip-box {
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 12px; padding: 14px 20px;
+    display: flex; flex-direction: column; gap: 8px;
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--muted); max-width: 290px;
+  }
+  .tip-box span { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; }
+  .tip-box strong { color: var(--text); min-width: 76px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<!-- ═══ Splash ═══════════════════════════════════════════════════ -->
+<div id="splash">
+  <div class="splash-title">AIR DRAW</div>
+  <div class="splash-sub">Gesture Drawing Interface</div>
+  <div class="loader"></div>
+  <div id="splash-msg">Loading hand tracking…</div>
+  <div class="tip-box">
+    <span>🤏 <strong>Pinch</strong>    Thumb + index → draw / size shape</span>
+    <span>⚡ <strong>Fast pinch</strong> Move quickly while pinched → erase</span>
+    <span>🐢 <strong>Slow pinch</strong> Move slowly while pinched → draw</span>
+    <span>🖐️ <strong>Open hand</strong>  Release pinch → stop</span>
+  </div>
+</div>
+
+<!-- ═══ Scene ════════════════════════════════════════════════════ -->
+<div id="scene">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas-persist"></canvas>
+  <canvas id="canvas-preview"></canvas>
+</div>
+
+<!-- ═══ HUD ══════════════════════════════════════════════════════ -->
+<div id="hud">
+  <div id="topbar">
+    <div class="logo">✦ Air Draw</div>
+    <div class="status-pill" id="status-pill">
+      <div class="dot"></div>
+      <span id="status-text">Initializing</span>
+    </div>
+  </div>
+
+  <div id="shape-hint"></div>
+  <div id="eraser-badge"><div class="eraser-dot"></div>Eraser</div>
+
+  <div id="bottombar">
+    <div id="controls-col">
+      <div id="mode-row">
+        <button class="mode-btn active" data-mode="free"><span class="icon">✏️</span>Free</button>
+        <button class="mode-btn" data-mode="circle"><span class="icon">⚪</span>Circle</button>
+        <button class="mode-btn" data-mode="rect"><span class="icon">▭</span>Rect</button>
+        <button class="mode-btn" data-mode="square"><span class="icon">⬛</span>Square</button>
+      </div>
+      <div id="palette">
+        <div class="swatch active" style="background:#02FF92" data-color="#02FF92"></div>
+        <div class="swatch" style="background:#FF5EDF" data-color="#FF5EDF"></div>
+        <div class="swatch" style="background:#58A7FF" data-color="#58A7FF"></div>
+        <div class="swatch" style="background:#FFD600" data-color="#FFD600"></div>
+        <div class="swatch" style="background:#FF6B6B" data-color="#FF6B6B"></div>
+        <div class="swatch" style="background:#ffffff" data-color="#ffffff"></div>
+      </div>
+      <div id="brush-row">
+        <div class="bsize" style="width:10px;height:10px;color:#777" data-size="3"></div>
+        <div class="bsize active" style="width:16px;height:16px;color:#aaa" data-size="5"></div>
+        <div class="bsize" style="width:22px;height:22px;color:#ccc" data-size="9"></div>
+        <div class="bsize" style="width:28px;height:28px;color:#eee" data-size="14"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Clear button — fixed top-right, z-index 200 ═════════════ -->
+<button id="btn-clear" aria-label="Clear canvas">
+  <span class="x-icon">✕</span>Clear
+</button>
+
+<!-- ═══ Finger cursor ════════════════════════════════════════════ -->
+<div id="cursor"></div>
+
+<!-- MediaPipe CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   AIR DRAW — Enhanced v4
+   ─────────────────────────────────────────────────────────────────
+   [1]  Exponential smoothing on finger XY (adaptive alpha)
+   [2]  Min-distance dead zone before committing a segment
+   [3]  Hysteresis pinch (separate START / STOP thresholds)
+   [4]  Point interpolation — gapless lines on fast moves
+   [5]  Tuned MediaPipe confidence for mobile stability
+   [6]  round lineCap + lineJoin everywhere
+   [7]  480p camera, single hand — halves inference latency
+   [8]  Full state reset on hand-loss
+   [9]  Animated multi-state cursor (idle / draw / erase-idle / erase)
+   [10] RAF render loop decoupled from MediaPipe inference
+   [11] Speed-based eraser: fast pinch = erase, slow = draw
+   [12] Clear button: fixed top-right, z-200, 50×56 min tap target
+═══════════════════════════════════════════════════════════════════ */
+(() => {
+'use strict';
+
+/* ── DOM refs ─────────────────────────────────────────────────── */
+const video       = document.getElementById('video');
+const cPersist    = document.getElementById('canvas-persist');
+const cPreview    = document.getElementById('canvas-preview');
+const ctxP        = cPersist.getContext('2d');
+const ctxV        = cPreview.getContext('2d');
+const splash      = document.getElementById('splash');
+const splashMsg   = document.getElementById('splash-msg');
+const statusPill  = document.getElementById('status-pill');
+const statusTxt   = document.getElementById('status-text');
+const cursorEl    = document.getElementById('cursor');
+const shapeHintEl = document.getElementById('shape-hint');
+const eraserBadge = document.getElementById('eraser-badge');
+const btnClear    = document.getElementById('btn-clear');
+
+/* ── Drawing config ────────────────────────────────────────────── */
+let drawColor = '#02FF92';
+let brushSize = 5;
+let drawMode  = 'free';  // 'free' | 'circle' | 'rect' | 'square'
+
+/* ── Tuning constants ──────────────────────────────────────────── */
+
+// [1] Exponential smoothing — lower α = smoother but laggier
+const SMOOTH_ALPHA   = 0.35;   // 0.25–0.45 sweet spot for mobile
+
+// [2] Dead zone in pixels — ignore sub-threshold micro-jitter
+const MIN_DRAW_DIST  = 2.8;
+
+// [3] Hysteresis thresholds (normalised MediaPipe landmark distance)
+//     Pinch STARTS when distance drops below START, and only STOPS
+//     once it rises above STOP — prevents rapid on/off flickering.
+const PINCH_START    = 0.058;
+const PINCH_STOP     = 0.082;
+
+// [11] Speed-based eraser (pixels moved between RAF frames)
+//      Above ENTER → switch to erase; below LEAVE → return to draw.
+//      Hysteresis gap prevents mode oscillation.
+const ERASE_ENTER    = 26;   // px/frame — fast move triggers erase
+const ERASE_LEAVE    = 10;   // px/frame — slow move exits erase
+const ERASE_RADIUS   = 24;   // eraser circle radius in pixels
+
+/* ── Runtime state ─────────────────────────────────────────────── */
+let handVisible  = false;
+let noHandTimer  = null;
+
+// [1] Smoothed finger position (written by onResults, read by RAF)
+let smoothX = 0, smoothY = 0;
+let cursorReady = false;      // has first frame been initialised?
+
+// [3] Hysteresis pinch state
+let isPinching  = false;
+
+// Free draw
+let freeActive  = false;
+let lastDrawX   = null, lastDrawY = null;
+
+// [11] Eraser state
+let isErasing   = false;
+let eraseLastX  = null, eraseLastY = null;
+
+// Shape draw
+let shapeActive  = false;
+let shapeStart   = null;     // { x, y } of pinch-down
+let shapeLocked  = false;    // must open hand before next shape
+let prevPinching = false;    // for pinch edge-detection in RAF loop
+
+// [10] Pending state shared between onResults and RAF loop
+let pendingX     = 0, pendingY = 0;
+let pendingPinch = false;
+let pendingHand  = false;
+
+/* ── Helpers: status bar & hints ───────────────────────────────── */
+function setStatus(text, cls = '') {
+  statusTxt.textContent = text;
+  statusPill.className  = 'status-pill' + (cls ? ' ' + cls : '');
+}
+function showHint(t) { shapeHintEl.textContent = t; shapeHintEl.classList.add('visible'); }
+function hideHint()  { shapeHintEl.classList.remove('visible'); }
+function showEraser(){ eraserBadge.classList.add('visible'); }
+function hideEraser(){ eraserBadge.classList.remove('visible'); }
+
+/* ── Canvas resize (preserves persistent drawing) ──────────────── */
+function resizeCanvases() {
+  const snap = ctxP.getImageData(0, 0, cPersist.width || 1, cPersist.height || 1);
+  cPersist.width  = cPreview.width  = window.innerWidth;
+  cPersist.height = cPreview.height = window.innerHeight;
+  ctxP.putImageData(snap, 0, 0);
+}
+resizeCanvases();
+window.addEventListener('resize', resizeCanvases);
+
+/* ── UI event handlers ─────────────────────────────────────────── */
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    drawMode = btn.dataset.mode;
+    resetShapeState();
+    lastDrawX = lastDrawY = null;
+    freeActive = false;
+  });
+});
+
+document.querySelectorAll('.swatch').forEach(sw => {
+  sw.addEventListener('click', () => {
+    document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+    sw.classList.add('active');
+    drawColor = sw.dataset.color;
+  });
+});
+
+document.querySelectorAll('.bsize').forEach(bs => {
+  bs.addEventListener('click', () => {
+    document.querySelectorAll('.bsize').forEach(b => b.classList.remove('active'));
+    bs.classList.add('active');
+    brushSize = +bs.dataset.size;
+  });
+});
+
+/* [12] Clear — direct DOM listener at z-200, never blocked by canvas */
+btnClear.addEventListener('click', () => {
+  ctxP.clearRect(0, 0, cPersist.width, cPersist.height);
+  ctxV.clearRect(0, 0, cPreview.width, cPreview.height);
+  resetShapeState();
+  lastDrawX  = lastDrawY  = null;
+  eraseLastX = eraseLastY = null;
+  freeActive = false;
+  isErasing  = false;
+  hideEraser();
+});
+
+/* ── Stroke helpers ─────────────────────────────────────────────── */
+// [6] Always round caps + joins; optional dashed for previews
+function applyStroke(ctx, color, width, dashed = false) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = width;
+  ctx.lineCap     = 'round';
+  ctx.lineJoin    = 'round';
+  ctx.shadowColor = color;
+  ctx.shadowBlur  = width * 2.1;
+  ctx.setLineDash(dashed ? [10, 7] : []);
+}
+function clearStroke(ctx) { ctx.shadowBlur = 0; ctx.setLineDash([]); }
+
+/* ── [4] Interpolated free-draw ─────────────────────────────────
+   Injects intermediate points every (brushSize/2) px so fast
+   gestures never leave gaps in the stroke.                       */
+function freeDraw(x, y) {
+  if (lastDrawX === null) { lastDrawX = x; lastDrawY = y; return; }
+
+  const dx   = x - lastDrawX;
+  const dy   = y - lastDrawY;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist < MIN_DRAW_DIST) return;   // [2] ignore micro-jitter
+
+  const step  = Math.max(1, brushSize * 0.5);
+  const steps = Math.ceil(dist / step);
+
+  ctxP.beginPath();
+  ctxP.moveTo(lastDrawX, lastDrawY);
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    ctxP.lineTo(lastDrawX + dx * t, lastDrawY + dy * t);
+  }
+  applyStroke(ctxP, drawColor, brushSize);
+  ctxP.stroke();
+  clearStroke(ctxP);
+
+  lastDrawX = x; lastDrawY = y;
+}
+
+/* ── [11] Speed-based eraser ────────────────────────────────────
+   Measures pixels-per-frame while pinching.
+   Fast (>ERASE_ENTER) → erase mode ON.
+   Slow (<ERASE_LEAVE) → erase mode OFF.
+   Hysteresis gap (ENTER vs LEAVE) prevents flickering.           */
+function updateEraseMode(x, y) {
+  if (eraseLastX === null) { eraseLastX = x; eraseLastY = y; return; }
+
+  const speed = Math.hypot(x - eraseLastX, y - eraseLastY);
+
+  if (!isErasing && speed > ERASE_ENTER) isErasing = true;
+  if ( isErasing && speed < ERASE_LEAVE) isErasing = false;
+
+  eraseLastX = x; eraseLastY = y;
+}
+
+/* Erase a circle at (x, y) using destination-out compositing */
+function eraseAt(x, y) {
+  ctxP.save();
+  ctxP.globalCompositeOperation = 'destination-out';
+  ctxP.beginPath();
+  ctxP.arc(x, y, ERASE_RADIUS, 0, Math.PI * 2);
+  ctxP.fillStyle = 'rgba(0,0,0,1)';  // alpha=1 required for dest-out
+  ctxP.fill();
+  ctxP.restore();
+}
+
+/* ── Shape helpers ───────────────────────────────────────────────
+   Shared inner functions used for both live preview (dashed, ctxV)
+   and final commit (solid, ctxP).                                 */
+function _drawRect(ctx, x0, y0, x1, y1, dashed) {
+  ctx.beginPath();
+  ctx.rect(Math.min(x0,x1), Math.min(y0,y1), Math.abs(x1-x0), Math.abs(y1-y0));
+  applyStroke(ctx, drawColor, brushSize, dashed);
+  ctx.stroke(); clearStroke(ctx);
+}
+function _drawSquare(ctx, x0, y0, x1, y1, dashed) {
+  const side = Math.min(Math.abs(x1-x0), Math.abs(y1-y0));
+  const sx = x1<x0 ? x0-side : x0;
+  const sy = y1<y0 ? y0-side : y0;
+  ctx.beginPath(); ctx.rect(sx, sy, side, side);
+  applyStroke(ctx, drawColor, brushSize, dashed);
+  ctx.stroke(); clearStroke(ctx);
+}
+function _drawCircle(ctx, cx, cy, x1, y1, dashed) {
+  const r = Math.hypot(x1-cx, y1-cy);
+  ctx.beginPath(); ctx.arc(cx, cy, Math.max(1,r), 0, Math.PI*2);
+  applyStroke(ctx, drawColor, brushSize, dashed);
+  ctx.stroke(); clearStroke(ctx);
+}
+
+function previewClear() { ctxV.clearRect(0, 0, cPreview.width, cPreview.height); }
+
+function previewShape(x, y) {
+  previewClear();
+  if (!shapeStart) return;
+  const s = shapeStart;
+  if (drawMode==='rect')   _drawRect(ctxV, s.x, s.y, x, y, true);
+  if (drawMode==='square') _drawSquare(ctxV, s.x, s.y, x, y, true);
+  if (drawMode==='circle') _drawCircle(ctxV, s.x, s.y, x, y, true);
+}
+function commitShape(x, y) {
+  if (!shapeStart) return;
+  if (Math.hypot(x-shapeStart.x, y-shapeStart.y) < 14) return; // ignore taps
+  const s = shapeStart;
+  if (drawMode==='rect')   _drawRect(ctxP, s.x, s.y, x, y, false);
+  if (drawMode==='square') _drawSquare(ctxP, s.x, s.y, x, y, false);
+  if (drawMode==='circle') _drawCircle(ctxP, s.x, s.y, x, y, false);
+}
+
+/* ── State resets ────────────────────────────────────────────── */
+function resetShapeState() {
+  shapeActive  = false;
+  shapeStart   = null;
+  shapeLocked  = false;
+  prevPinching = false;
+  previewClear();
+  hideHint();
+}
+
+// [8] Complete reset when hand tracking is lost
+function resetAll() {
+  freeActive  = false;
+  lastDrawX   = lastDrawY  = null;
+  isErasing   = false;
+  eraseLastX  = eraseLastY = null;
+  isPinching  = false;
+  cursorReady = false;
+  resetShapeState();
+}
+
+/* ── Landmark utilities ──────────────────────────────────────── */
+function lmDist(a, b) { return Math.hypot(a.x-b.x, a.y-b.y); }
+
+// Mirror X axis to match CSS scaleX(-1) on the video element
+function toScreen(lm) {
+  return { x: (1-lm.x)*cPersist.width, y: lm.y*cPersist.height };
+}
+
+// [3] Hysteresis pinch update
+function updatePinch(d) {
+  if (!isPinching && d < PINCH_START) isPinching = true;
+  if ( isPinching && d > PINCH_STOP)  isPinching = false;
+  return isPinching;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   MEDIAPIPE RESULT HANDLER
+   ─────────────────────────────────────────────────────────────
+   Runs inside MediaPipe's own frame loop (~20–30 fps on mobile).
+   ONLY updates shared state variables — NEVER touches the canvas.
+   All canvas writes happen in the RAF loop below.
+════════════════════════════════════════════════════════════════ */
+function onResults(results) {
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    pendingHand = false;
+    return;
+  }
+  pendingHand = true;
+
+  const lm  = results.multiHandLandmarks[0];
+  const raw = toScreen(lm[8]);   // index fingertip in screen coords
+
+  // [1] Exponential smoothing — init on first frame to avoid jump from 0,0
+  if (!cursorReady) {
+    smoothX = raw.x; smoothY = raw.y;
+    cursorReady = true;
+  } else {
+    smoothX += SMOOTH_ALPHA * (raw.x - smoothX);
+    smoothY += SMOOTH_ALPHA * (raw.y - smoothY);
+  }
+
+  // [3] Hysteresis pinch detection
+  const pinch = updatePinch(lmDist(lm[4], lm[8]));
+
+  pendingX     = smoothX;
+  pendingY     = smoothY;
+  pendingPinch = pinch;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   RAF RENDER LOOP  [10]
+   ─────────────────────────────────────────────────────────────
+   Runs at the display refresh rate (typically 60 fps).
+   Reads the latest state written by onResults and does all
+   canvas drawing / DOM updates from a single place.
+════════════════════════════════════════════════════════════════ */
+function renderLoop() {
+  requestAnimationFrame(renderLoop);
+
+  /* ── Hand absent ── */
+  if (!pendingHand) {
+    if (handVisible) {
+      handVisible = false;
+      cursorEl.style.display = 'none';
+      resetAll();
+      hideEraser();
+      setStatus('No hand', '');
+      clearTimeout(noHandTimer);
+      noHandTimer = setTimeout(() => {
+        if (!handVisible) setStatus('Ready', 'active');
+      }, 800);
+    }
+    return;
+  }
+
+  /* ── Hand present ── */
+  clearTimeout(noHandTimer);
+  if (!handVisible) {
+    handVisible = true;
+    cursorEl.style.display = 'block';
+  }
+
+  const x     = pendingX;
+  const y     = pendingY;
+  const pinch = pendingPinch;
+
+  /* ── [11] Update speed-based eraser mode ── */
+  if (pinch) {
+    updateEraseMode(x, y);
+  } else {
+    // Release pinch → always reset eraser so next pinch starts fresh
+    eraseLastX = eraseLastY = null;
+    isErasing  = false;
+  }
+
+  /* ── [9] Cursor appearance ── */
+  cursorEl.style.left = x + 'px';
+  cursorEl.style.top  = y + 'px';
+
+  if (!pinch) {
+    cursorEl.className = '';                  // idle ring
+  } else if (isErasing) {
+    cursorEl.className = 'erase-active';      // large red filled
+  } else {
+    cursorEl.className = 'pinching';          // small green dot
+  }
+
+  /* ── Status pill & eraser badge ── */
+  if (pinch && isErasing) {
+    showEraser();
+    setStatus('Erasing…', 'erasing');
+  } else if (pinch) {
+    hideEraser();
+    setStatus('Drawing', 'drawing');
+  } else {
+    hideEraser();
+    setStatus('Hand detected', 'active');
+  }
+
+  /* ── Pinch edge detection (for shape modes) ── */
+  const pinchDown = pinch && !prevPinching;
+  const pinchUp   = !pinch && prevPinching;
+  prevPinching    = pinch;
+
+  /* ════ ERASE overrides all draw modes ════ */
+  if (pinch && isErasing) {
+    lastDrawX = lastDrawY = null; freeActive = false;
+    resetShapeState();
+    eraseAt(x, y);
+    return;
+  }
+
+  /* ════ FREE DRAW ════ */
+  if (drawMode === 'free') {
+    if (pinch) {
+      freeActive = true;
+      freeDraw(x, y);
+    } else {
+      if (freeActive) lastDrawX = lastDrawY = null;
+      freeActive = false;
+    }
+    return;
+  }
+
+  /* ════ SHAPE MODES ════ */
+  // Pinch down → start sizing
+  if (pinchDown && !shapeLocked) {
+    shapeActive = true;
+    shapeStart  = { x, y };
+    setStatus('Sizing…', 'drawing');
+    const labels = { circle:'⚪  Circle', rect:'▭  Rectangle', square:'⬛  Square' };
+    showHint(labels[drawMode] || drawMode);
+  }
+  // Holding pinch → live dashed preview
+  if (pinch && shapeActive && shapeStart) {
+    previewShape(x, y);
+  }
+  // Pinch up → commit solid shape
+  if (pinchUp && shapeActive && shapeStart) {
+    previewClear();
+    commitShape(x, y);
+    shapeActive = false;
+    shapeStart  = null;
+    shapeLocked = true;   // debounce: require full open before next shape
+    hideHint();
+    setStatus('Hand detected', 'active');
+  }
+  // Hand fully open → unlock for next gesture
+  if (!pinch && shapeLocked) shapeLocked = false;
+  if (!pinch && !shapeActive) setStatus('Hand detected', 'active');
+}
+
+/* ════════════════════════════════════════════════════════════════
+   MEDIAPIPE INIT
+════════════════════════════════════════════════════════════════ */
+async function initMediaPipe() {
+  splashMsg.textContent = 'Loading hand tracking model…';
+
+  const hands = new Hands({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+  });
+
+  hands.setOptions({
+    maxNumHands:            1,     // [7] one hand → half the inference work
+    modelComplexity:        0,     // [7] lite model — best mobile throughput
+    minDetectionConfidence: 0.70,  // [5] stable re-detection
+    minTrackingConfidence:  0.60   // [5] stable per-frame tracking
+  });
+
+  hands.onResults(onResults);
+  splashMsg.textContent = 'Requesting camera access…';
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' }, // back camera
+        width:      { ideal: 640 },           // [7] 480p — halves pipeline cost
+        height:     { ideal: 480 },
+        frameRate:  { ideal: 30, max: 30 }
+      },
+      audio: false
+    });
+  } catch (e) {
+    splashMsg.textContent = 'Camera access denied — please allow camera and reload.';
+    console.error('Camera error:', e);
+    return;
+  }
+
+  video.srcObject = stream;
+  await new Promise(res => { video.onloadedmetadata = res; });
+  video.play();
+  video.classList.add('ready');
+  splashMsg.textContent = 'Calibrating…';
+
+  // [7] Camera helper resolution must match the stream
+  const camera = new Camera(video, {
+    onFrame: async () => { await hands.send({ image: video }); },
+    width: 640, height: 480
+  });
+  camera.start();
+
+  // [10] Start the RAF render loop (independent of MediaPipe speed)
+  requestAnimationFrame(renderLoop);
+
+  setTimeout(() => {
+    splash.classList.add('hidden');
+    setTimeout(() => splash.remove(), 800);
+    setStatus('Ready', 'active');
+  }, 1200);
+}
+
+initMediaPipe().catch(err => {
+  console.error('Init error:', err);
+  splashMsg.textContent = 'Initialization failed — please reload.';
+});
+
+})();
+</script>
+</body>
+</html>
